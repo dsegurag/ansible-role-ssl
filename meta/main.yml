@@ -1,0 +1,12 @@
+---
+dependencies: []
+
+galaxy_info:
+  role_name: ssl
+  author: dsegurag
+  description: An Ansible role for generating SSL certificates using Let's Encrypt, with DNS verification managed via Cloudflare.
+  license: MIT
+  min_ansible_version: 2.17.4
+  platforms:
+    - name: Debian
+    - name: Ubuntu

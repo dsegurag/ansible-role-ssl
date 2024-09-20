@@ -1,0 +1,7 @@
+---
+ssl_letsencrypt_email: "admin@{{ ssl_cloudflare_domain }}"
+ssl_san_certificates:
+  - "DNS:www.{{ ssl_cloudflare_domain }}"
+
+ssl_cert_directory: /etc/ssl/certs
+ssl_key_directory: /etc/ssl/private

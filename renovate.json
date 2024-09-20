@@ -1,0 +1,39 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "group:all",
+    ":automergeMinor",
+    ":automergeDigest",
+    ":separateMultipleMajorReleases"
+  ],
+  "timezone": "Europe/Madrid",
+  "labels": [
+    "renovate"
+  ],
+  "major": {
+    "addLabels": [
+      "major"
+    ]
+  },
+  "minor": {
+    "addLabels": [
+      "minor"
+    ]
+  },
+  "patch": {
+    "addLabels": [
+      "patch"
+    ]
+  },
+  "pin": {
+    "addLabels": [
+      "pin"
+    ]
+  },
+  "digest": {
+    "addLabels": [
+      "digest"
+    ]
+  }
+}

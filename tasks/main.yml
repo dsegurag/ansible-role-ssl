@@ -1,0 +1,114 @@
+---
+- name: ssl certificate
+  block:
+    - name: ensure "ssl_cloudflare_domain" variable is provided
+      ansible.builtin.assert:
+        that:
+          - ssl_cloudflare_domain is defined
+          - ssl_cloudflare_domain != ''
+        fail_msg: "The ssl_cloudflare_domain variable is mandatory."
+
+    - name: ensure "ssl_cloudflare_token" variable is provided
+      ansible.builtin.assert:
+        that:
+          - ssl_cloudflare_token is defined
+          - ssl_cloudflare_token != ''
+        fail_msg: "The ssl_cloudflare_token variable is mandatory."
+
+    - name: check if the certifiacte directory exists
+      ansible.builtin.stat:
+        path: "{{ ssl_cert_directory }}"
+      register: cert_directory
+
+    - name: create the certifiacte directory if it does not exist
+      ansible.builtin.file:
+        path: "{{ ssl_cert_directory }}"
+        state: directory
+        mode: "755"
+      when: not cert_directory.stat.exists
+
+    - name: check if the key directory exists
+      ansible.builtin.stat:
+        path: "{{ ssl_key_directory }}"
+      register: key_directory
+
+    - name: create the key directory if it does not exist
+      ansible.builtin.file:
+        path: "{{ ssl_key_directory }}"
+        state: directory
+        mode: "700"
+      when: not key_directory.stat.exists
+
+    - name: create private key (rsa, 4096 bits)
+      register: private_key
+      community.crypto.openssl_privatekey:
+        path: "{{ ssl_key_directory }}/{{ ssl_cloudflare_domain }}.key"
+
+    - name: create certificate signing request (csr)
+      register: csr
+      community.crypto.openssl_csr:
+        path: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.csr"
+        privatekey_path: "{{ private_key.filename }}"
+        common_name: "{{ ssl_cloudflare_domain }}"
+        subject_alt_name: "{{ ssl_san_certificates }}"
+
+    - name: create private key (rsa, 4096 bits) for let's encrypt
+      register: letsencrypt_private_key
+      community.crypto.openssl_privatekey:
+        path: "{{ ssl_key_directory }}/{{ ssl_cloudflare_domain }}-letsencrypt.key"
+
+    - name: create a challenge for domain using a account key file
+      register: domain_challenge
+      community.crypto.acme_certificate:
+        account_email: "info@{{ ssl_cloudflare_domain }}"
+        account_key_src: "{{ letsencrypt_private_key.filename }}"
+        acme_version: 2
+        acme_directory: https://acme-v02.api.letsencrypt.org/directory
+        terms_agreed: true
+        challenge: dns-01
+        csr: "{{ csr.filename }}"
+        cert: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.crt"
+        remaining_days: 30
+
+    - name: create dns record for domain dns-01 challenge
+      when: domain_challenge['challenge_data'] is defined
+      with_dict: "{{ domain_challenge['challenge_data'] | default({}) }}"
+      community.general.cloudflare_dns:
+        api_token: "{{ ssl_cloudflare_token }}"
+        state: present
+        zone: "{{ ssl_cloudflare_domain }}"
+        type: TXT
+        solo: true
+        record: "{{ item.value['dns-01']['record'] }}"
+        value: "{{ item.value['dns-01']['resource_value'] }}"
+
+    - name: let the challenge be validated and retrieve the cert and intermediate certificate # noqa: no-handler
+      when: domain_challenge is changed
+      register: letsencrypt_validation
+      until: letsencrypt_validation is success
+      retries: 12
+      delay: 10
+      community.crypto.acme_certificate:
+        account_email: "{{ ssl_letsencrypt_email }}"
+        account_key_src: "{{ letsencrypt_private_key.filename }}"
+        acme_version: 2
+        acme_directory: https://acme-v02.api.letsencrypt.org/directory
+        challenge: dns-01
+        csr: "{{ csr.filename }}"
+        cert: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.crt"
+        fullchain: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}-fullchain.crt"
+        chain: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}-intermediate.crt"
+        data: "{{ domain_challenge }}"
+        remaining_days: 30
+
+  always:
+    - name: delete dns record for domain dns-01 challenge
+      when: domain_challenge['challenge_data'] is defined
+      with_dict: "{{ domain_challenge['challenge_data'] | default({}) }}"
+      community.general.cloudflare_dns:
+        api_token: "{{ ssl_cloudflare_token }}"
+        state: absent
+        zone: "{{ ssl_cloudflare_domain }}"
+        type: TXT
+        record: "{{ item.value['dns-01']['record'] }}"
+        value: "{{ item.value['dns-01']['resource_value'] }}"
