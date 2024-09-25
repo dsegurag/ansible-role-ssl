@@ -9,7 +9,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4.1.7
+      - uses: actions/checkout@v4.2.0
       - uses: actions/setup-python@v5.2.0
         with:
           python-version: 3.12.6
