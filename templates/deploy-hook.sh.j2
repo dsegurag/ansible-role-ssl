@@ -1,0 +1,15 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# Certbot runs every executable in this directory after a successful renewal, so
+# bail out unless the lineage that just renewed is ours.
+set -eu
+
+[ "${RENEWED_LINEAGE:-}" = "{{ ssl_dir }}" ] || exit 0
+{% if ssl_reload_services | length > 0 %}
+
+systemctl reload {{ ssl_reload_services | join(' ') }}
+{% endif %}
+{% if ssl_deploy_hook_command | length > 0 %}
+
+{{ ssl_deploy_hook_command }}
+{% endif %}

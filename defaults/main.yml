@@ -1,7 +1,51 @@
 ---
-ssl_letsencrypt_email: "admin@{{ ssl_cloudflare_domain }}"
-ssl_san_certificates:
-  - "DNS:www.{{ ssl_cloudflare_domain }}"
+# Certbot lineage name. It decides the output path, /etc/letsencrypt/live/<name>/,
+# so pin it explicitly: left to itself certbot derives the name from the first
+# domain and appends -0001 as soon as the domain set changes, which would move
+# the files out from under whatever is serving them.
+ssl_cert_name: "{{ ssl_domains | first | regex_replace('^\\*\\.', '') }}"
 
-ssl_cert_directory: /etc/ssl/certs
-ssl_key_directory: /etc/ssl/private
+# Account e-mail for expiry notices.
+ssl_email: "admin@{{ ssl_cert_name }}"
+
+# ACME endpoint. Defaults to Let's Encrypt production; override with the staging
+# directory (https://acme-staging-v02.api.letsencrypt.org/directory) while
+# testing to avoid the duplicate-certificate rate limit.
+ssl_acme_directory: https://acme-v02.api.letsencrypt.org/directory
+
+# Certificate key. ecdsa is certbot's own default since 2.0; switch to rsa if you
+# need to support clients that predate widespread ECDSA support.
+ssl_key_type: ecdsa
+ssl_rsa_key_size: 4096
+
+# Seconds certbot waits for the _acme-challenge TXT records to reach Cloudflare's
+# authoritative name servers before asking the CA to validate them.
+ssl_dns_propagation_seconds: 30
+
+# Cloudflare API token, read by the certbot plugin. Must stay on the host for
+# unattended renewal to work.
+ssl_credentials_file: /etc/letsencrypt/cloudflare.ini
+
+# Where certbot writes the issued material. Reference these variables rather than
+# hardcoding paths.
+ssl_dir: "/etc/letsencrypt/live/{{ ssl_cert_name }}"
+ssl_privatekey: "{{ ssl_dir }}/privkey.pem"
+ssl_cert: "{{ ssl_dir }}/cert.pem"
+ssl_chain: "{{ ssl_dir }}/chain.pem"
+ssl_fullchain: "{{ ssl_dir }}/fullchain.pem"
+
+# Unattended renewal, handled on the instance by certbot.timer.
+ssl_auto_renew: true
+
+# Renew when fewer than this many days of validity remain. Empty keeps certbot's
+# own default, which renews once less than a third of the lifetime is left.
+ssl_renew_days: ""
+
+# Run after every successful renewal. Services are reloaded via systemctl; the
+# command is appended verbatim for anything else (copying the cert, poking an API).
+ssl_reload_services: []
+ssl_deploy_hook_command: ""
+
+# Required inputs - no sensible default, set them when calling the role:
+#   ssl_domains          list of names, apex first, e.g. [example.com, "*.example.com"]
+#   ssl_cloudflare_token token scoped to Zone:DNS:Edit + Zone:Read (vault it)
