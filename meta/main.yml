@@ -4,9 +4,24 @@ dependencies: []
 galaxy_info:
   role_name: ssl
   author: dsegurag
-  description: An Ansible role for generating SSL certificates using Let's Encrypt, with DNS verification managed via Cloudflare.
+  description: >-
+    Install and configure certbot to issue and unattendedly renew Let's Encrypt
+    certificates, solving the DNS-01 challenge via Cloudflare.
   license: MIT
-  min_ansible_version: 2.17.4
+  min_ansible_version: "2.18"
   platforms:
     - name: Debian
+      versions:
+        - bookworm
+        - trixie
     - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+  galaxy_tags:
+    - tls
+    - certificate
+    - letsencrypt
+    - acme
+    - certbot
+    - cloudflare

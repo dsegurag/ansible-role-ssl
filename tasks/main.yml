@@ -1,114 +1,111 @@
 ---
-- name: ssl certificate
-  block:
-    - name: ensure "ssl_cloudflare_domain" variable is provided
-      ansible.builtin.assert:
-        that:
-          - ssl_cloudflare_domain is defined
-          - ssl_cloudflare_domain != ''
-        fail_msg: "The ssl_cloudflare_domain variable is mandatory."
+# Install and configure certbot so the instance issues its own TLS certificate
+# from an ACME CA - Let's Encrypt by default - and renews it unattended through
+# certbot's own systemd timer, solving the DNS-01 challenge via Cloudflare.
+# Because the challenge is solved over DNS, one certificate can cover the apex
+# and every subdomain (*.example.com).
 
-    - name: ensure "ssl_cloudflare_token" variable is provided
-      ansible.builtin.assert:
-        that:
-          - ssl_cloudflare_token is defined
-          - ssl_cloudflare_token != ''
-        fail_msg: "The ssl_cloudflare_token variable is mandatory."
+- name: Ensure the required variables are provided
+  ansible.builtin.assert:
+    that:
+      - ssl_domains is defined
+      - ssl_domains is sequence
+      - ssl_domains is not string
+      - ssl_domains | length > 0
+      - ssl_cloudflare_token is defined
+      - ssl_cloudflare_token | length > 0
+    fail_msg: >-
+      ssl_domains (a non-empty list of domain names, apex first) and
+      ssl_cloudflare_token are mandatory.
 
-    - name: check if the certifiacte directory exists
-      ansible.builtin.stat:
-        path: "{{ ssl_cert_directory }}"
-      register: cert_directory
+- name: Install certbot and the Cloudflare DNS plugin
+  ansible.builtin.apt:
+    name:
+      - certbot
+      - python3-certbot-dns-cloudflare
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
 
-    - name: create the certifiacte directory if it does not exist
-      ansible.builtin.file:
-        path: "{{ ssl_cert_directory }}"
-        state: directory
-        mode: "755"
-      when: not cert_directory.stat.exists
+# The token stays in this file rather than on certbot's command line, so it is
+# never visible in the process list.
+- name: Write the Cloudflare credentials file
+  ansible.builtin.template:
+    src: cloudflare.ini.j2
+    dest: "{{ ssl_credentials_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
 
-    - name: check if the key directory exists
-      ansible.builtin.stat:
-        path: "{{ ssl_key_directory }}"
-      register: key_directory
+# The certbot package ships cli.ini and the systemd units but not the hook
+# directories - certbot creates them on first run, which is after this task.
+- name: Create the deploy hook directory
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: ssl_reload_services | length > 0 or ssl_deploy_hook_command | length > 0
 
-    - name: create the key directory if it does not exist
-      ansible.builtin.file:
-        path: "{{ ssl_key_directory }}"
-        state: directory
-        mode: "700"
-      when: not key_directory.stat.exists
+# Dropping the hook in renewal-hooks/deploy/ instead of passing --deploy-hook
+# keeps it declarative: changing it is a file rewrite, not a certificate
+# reissue. The script guards on $RENEWED_LINEAGE so it stays quiet when certbot
+# renews some other certificate on the same host.
+- name: Install the deploy hook
+  ansible.builtin.template:
+    src: deploy-hook.sh.j2
+    dest: "/etc/letsencrypt/renewal-hooks/deploy/{{ ssl_cert_name }}.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: ssl_reload_services | length > 0 or ssl_deploy_hook_command | length > 0
 
-    - name: create private key (rsa, 4096 bits)
-      register: private_key
-      community.crypto.openssl_privatekey:
-        path: "{{ ssl_key_directory }}/{{ ssl_cloudflare_domain }}.key"
+# --keep-until-expiring makes this a no-op while the certificate covers the same
+# domains and is not due for renewal, so the task can run unconditionally. That
+# is deliberate: a "creates:" guard would silently ignore changes to ssl_domains.
+- name: Issue the certificate
+  ansible.builtin.command:
+    cmd: >-
+      certbot certonly
+      --non-interactive
+      --agree-tos
+      --email {{ ssl_email | quote }}
+      --server {{ ssl_acme_directory | quote }}
+      --cert-name {{ ssl_cert_name | quote }}
+      {{ ssl_domains | map('regex_replace', '^', '-d ') | join(' ') }}
+      --dns-cloudflare
+      --dns-cloudflare-credentials {{ ssl_credentials_file | quote }}
+      --dns-cloudflare-propagation-seconds {{ ssl_dns_propagation_seconds }}
+      --key-type {{ ssl_key_type | quote }}
+      {% if ssl_key_type == 'rsa' %}--rsa-key-size {{ ssl_rsa_key_size }}{% endif %}
+      --keep-until-expiring
+  register: ssl_certonly
+  changed_when: >-
+    'not yet due for renewal' not in ssl_certonly.stdout
+    and 'Keeping the existing certificate' not in ssl_certonly.stdout
 
-    - name: create certificate signing request (csr)
-      register: csr
-      community.crypto.openssl_csr:
-        path: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.csr"
-        privatekey_path: "{{ private_key.filename }}"
-        common_name: "{{ ssl_cloudflare_domain }}"
-        subject_alt_name: "{{ ssl_san_certificates }}"
+# renew_before_expiry in the renewal config is the version-portable way to move
+# the renewal window; the --renew-before-expiry flag is not in every certbot we
+# support (bookworm ships 2.0.0).
+- name: Set the renewal window
+  ansible.builtin.lineinfile:
+    path: "/etc/letsencrypt/renewal/{{ ssl_cert_name }}.conf"
+    regexp: '^renew_before_expiry\s*='
+    line: "renew_before_expiry = {{ ssl_renew_days }} days"
+    insertbefore: BOF
+    owner: root
+    group: root
+    mode: "0644"
+  when: ssl_renew_days | string | length > 0
 
-    - name: create private key (rsa, 4096 bits) for let's encrypt
-      register: letsencrypt_private_key
-      community.crypto.openssl_privatekey:
-        path: "{{ ssl_key_directory }}/{{ ssl_cloudflare_domain }}-letsencrypt.key"
-
-    - name: create a challenge for domain using a account key file
-      register: domain_challenge
-      community.crypto.acme_certificate:
-        account_email: "info@{{ ssl_cloudflare_domain }}"
-        account_key_src: "{{ letsencrypt_private_key.filename }}"
-        acme_version: 2
-        acme_directory: https://acme-v02.api.letsencrypt.org/directory
-        terms_agreed: true
-        challenge: dns-01
-        csr: "{{ csr.filename }}"
-        cert: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.crt"
-        remaining_days: 30
-
-    - name: create dns record for domain dns-01 challenge
-      when: domain_challenge['challenge_data'] is defined
-      with_dict: "{{ domain_challenge['challenge_data'] | default({}) }}"
-      community.general.cloudflare_dns:
-        api_token: "{{ ssl_cloudflare_token }}"
-        state: present
-        zone: "{{ ssl_cloudflare_domain }}"
-        type: TXT
-        solo: true
-        record: "{{ item.value['dns-01']['record'] }}"
-        value: "{{ item.value['dns-01']['resource_value'] }}"
-
-    - name: let the challenge be validated and retrieve the cert and intermediate certificate # noqa: no-handler
-      when: domain_challenge is changed
-      register: letsencrypt_validation
-      until: letsencrypt_validation is success
-      retries: 12
-      delay: 10
-      community.crypto.acme_certificate:
-        account_email: "{{ ssl_letsencrypt_email }}"
-        account_key_src: "{{ letsencrypt_private_key.filename }}"
-        acme_version: 2
-        acme_directory: https://acme-v02.api.letsencrypt.org/directory
-        challenge: dns-01
-        csr: "{{ csr.filename }}"
-        cert: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}.crt"
-        fullchain: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}-fullchain.crt"
-        chain: "{{ ssl_cert_directory }}/{{ ssl_cloudflare_domain }}-intermediate.crt"
-        data: "{{ domain_challenge }}"
-        remaining_days: 30
-
-  always:
-    - name: delete dns record for domain dns-01 challenge
-      when: domain_challenge['challenge_data'] is defined
-      with_dict: "{{ domain_challenge['challenge_data'] | default({}) }}"
-      community.general.cloudflare_dns:
-        api_token: "{{ ssl_cloudflare_token }}"
-        state: absent
-        zone: "{{ ssl_cloudflare_domain }}"
-        type: TXT
-        record: "{{ item.value['dns-01']['record'] }}"
-        value: "{{ item.value['dns-01']['resource_value'] }}"
+# The Debian package enables this already; asserting it catches a host where it
+# was stopped. The packaged /etc/cron.d/certbot is guarded on systemd being
+# absent, so there is no double renewal.
+- name: Enable unattended renewal
+  ansible.builtin.systemd_service:
+    name: certbot.timer
+    enabled: true
+    state: started
+  when: ssl_auto_renew
